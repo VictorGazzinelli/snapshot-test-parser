@@ -3,6 +3,11 @@ const fs = require('fs');
 const path = require('path');
 const unzipper = require('unzipper');
 const Papa = require('papaparse');
+const glob = require('glob');
+const mv = require('mv');
+const rimraf = require('rimraf');
+const readline = require('readline');
+
 
 const checkUrl = async (url) => {
 	try {
@@ -64,11 +69,110 @@ async function stepFn(result, parser) {
 		const file = fs.createReadStream(zipPath);
 		file.pipe(unzipper.Extract({ path: unzipPath }));
 		file.on('end', function() {
-			fs.unlink(zipPath, function() {
-				console.log(`Deleted ${zipPath}`);
+			// move specific Jest files to a new directory inside 'repository-jest-files'
+			const repositoryJestFilesPath = path.join(reposPath, 'repository-jest-files');
+			if (!fs.existsSync(repositoryJestFilesPath)){
+				fs.mkdirSync(repositoryJestFilesPath);
+			}
+	
+			const jestFilesDestinationPath = path.join(repositoryJestFilesPath, `${repoName}-jest-files`);
+			if (!fs.existsSync(jestFilesDestinationPath)){
+				fs.mkdirSync(jestFilesDestinationPath);
+			}
+			let isMovingDone = false;
+	
+			const jestFilesExtensions = ['.js', '.jsx', '.ts', '.tsx', '.test.js', '.test.jsx', '.test.ts', '.test.tsx', '.spec.js', '.spec.jsx', '.spec.ts', '.spec.tsx', /*'.json',*/ '.mock.js', '.mock.jsx', '.mock.ts', '.mock.tsx', '.snap'];
+			jestFilesExtensions.forEach((ext) => {
+				console.log(`Moving files with extension ${ext} ...`);
+				glob(`${unzipPath}/**/*${ext}`, function (er, files) {
+					console.log(`Found ${files.length} files with extension ${ext}`);
+					files.forEach((filePath) => {
+						console.log(`Checking file ${filePath} ...`);
+
+						if(filePath.endsWith('.snap')) {
+							const fileName = path.basename(filePath);
+							const destinationPath = path.join(jestFilesDestinationPath, fileName);
+							mv(filePath, destinationPath, function(err) {
+								if (err) {
+									console.log(`Error moving file: ${err}`);
+								}
+							});
+							return;
+						}
+						try{
+							const fileContent = fs.readFileSync(filePath, 'utf8');
+							
+							// Check if fileContent includes snapshot methods
+							if ((fileContent.includes('.toMatchSnapshot()') || fileContent.includes('.toMatchInlineSnapshot()')) && !filePath.endsWith('.snap')) {
+								console.log(`Moving file ${filePath} ...`);
+								const fileName = path.basename(filePath);
+								const destinationPath = path.join(jestFilesDestinationPath, fileName);
+								mv(filePath, destinationPath, function(err) {
+									if (err) {
+										console.log(`Error moving file: ${err}`);
+									} else {
+										// If successfully moved the test file, also look for and move the .snap file.
+										const snapFilePath = filePath + '.snap';
+										if (fs.existsSync(snapFilePath)) {
+											const snapFileName = path.basename(snapFilePath);
+											const snapDestinationPath = path.join(jestFilesDestinationPath, snapFileName);
+											mv(snapFilePath, snapDestinationPath, function(err) {
+												if (err) {
+													console.log(`Error moving snapshot file: ${err}`);
+												}
+											});
+										}
+									}
+								});
+							}
+						} catch (err) {
+							console.log(`Error reading file: ${err}`);
+						}
+					});
+					isMovingDone = true;
+				});
+				console.log(`Moved files with extension ${ext}`);
 			});
-		  });
-		rowCount++;
+
+			// Timeout necessary to wait for the files to be moved
+			// Delete the downloaded repo
+			const afterAll = () => {
+				if(isMovingDone) {
+					fs.unlink(zipPath, function() {
+						console.log(`Deleted ${zipPath}`);
+					});
+					
+					fs.rmdir(unzipPath, { recursive: true }, function() {
+						console.log(`Deleted ${unzipPath}`);
+					});
+
+				  fs.readdir(jestFilesDestinationPath, (err, files) => {
+					if(err) {
+					  console.log(`Error reading directory: ${err}`);
+					  return;
+					}
+					if(files.length === 0) {
+					  // If no files are present, rename the directory
+					  const newDirectoryPath = path.join(repositoryJestFilesPath, `NONE-${repoName}-jest-files`);
+					  fs.renameSync(jestFilesDestinationPath, newDirectoryPath, function(err) {
+						if(err) {
+						  console.log(`Error renaming directory: ${err}`);
+						}
+					  });
+					}
+				  });
+				} else {
+				  setTimeout(afterAll, 1000); // check again in 1 second
+				}
+			  };
+
+			  setTimeout(() => {
+				  afterAll();
+			  }, 2000);
+			
+	
+			rowCount++;
+		});
     } 
     
     parser.resume();
@@ -76,5 +180,5 @@ async function stepFn(result, parser) {
 
 Papa.parse(file, {
 	step: stepFn,
-	preview: 5,
+	preview: 50,
 });
